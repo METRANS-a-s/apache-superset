@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from superset.reports.models import ReportSchedule
+from superset.reports.models import ReportDataFormat, ReportSchedule
 
 
 def test_get_native_filters_params():
@@ -378,3 +378,14 @@ def test_get_native_filters_params_unknown_filter_type():
     assert len(warnings) == 1
     assert "unrecognized filter type" in warnings[0]
     assert "filter_unknown_type" in warnings[0]
+
+
+def test_tabular_returns_csv_and_xlsx():
+    """
+    Test the ``tabular`` method.
+    """
+    assert ReportDataFormat.tabular() == {ReportDataFormat.CSV, ReportDataFormat.XLSX}
+    # Screenshot and text formats are not produced from tabular chart data.
+    assert ReportDataFormat.PNG not in ReportDataFormat.tabular()
+    assert ReportDataFormat.PDF not in ReportDataFormat.tabular()
+    assert ReportDataFormat.TEXT not in ReportDataFormat.tabular()

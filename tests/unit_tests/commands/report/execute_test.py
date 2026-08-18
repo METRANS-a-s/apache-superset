@@ -21,11 +21,19 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from celery.exceptions import SoftTimeLimitExceeded
 from pytest_mock import MockerFixture
 
 from superset.app import SupersetApp
 from superset.commands.exceptions import UpdateFailedError
+from superset.commands.report.exceptions import (
+    ReportScheduleCsvFailedError,
+    ReportScheduleCsvTimeout,
+    ReportScheduleXlsxFailedError,
+    ReportScheduleXlsxTimeout,
+)
 from superset.commands.report.execute import BaseReportState
+from superset.common.chart_data import ChartDataResultFormat
 from superset.dashboards.permalink.types import DashboardPermalinkState
 from superset.reports.models import (
     ReportRecipients,
@@ -645,3 +653,137 @@ def test_update_recipient_to_slack_v2_missing_channels(mocker: MockerFixture):
     )
     with pytest.raises(UpdateFailedError):
         mock_cmmd.update_report_schedule_slack_v2()
+
+
+@pytest.fixture
+def tabular_report_state(app: SupersetApp, mocker: MockerFixture) -> BaseReportState:
+    """A BaseReportState whose chart already has a saved query context."""
+    app.config.update({"ALERT_REPORTS_EXECUTORS": {}})
+    report_schedule = create_report_schedule(mocker)
+    report_schedule.chart.query_context = '{"queries": []}'
+    report_state = BaseReportState(
+        report_schedule=report_schedule,
+        scheduled_dttm=datetime.now(),
+        execution_id=UUID("084e7ee6-5557-4ecd-9632-b7f39c9ec524"),
+    )
+    mocker.patch("superset.commands.report.execute.get_executor").return_value = (
+        "executor",
+        "username",
+    )
+    mocker.patch("superset.commands.report.execute.security_manager")
+    mocker.patch("superset.commands.report.execute.machine_auth_provider_factory")
+    return report_state
+
+
+@pytest.mark.parametrize(
+    "result_format,expected_bytes",
+    [
+        (ChartDataResultFormat.XLSX, b"PK\x03\x04 xlsx bytes"),
+        (ChartDataResultFormat.CSV, b"col1,col2\n1,2"),
+    ],
+)
+def test_get_data_requests_the_asked_for_format(
+    tabular_report_state: BaseReportState,
+    mocker: MockerFixture,
+    result_format: ChartDataResultFormat,
+    expected_bytes: bytes,
+) -> None:
+    """
+    Test that ``_get_data`` fetches the export endpoint for the format asked for.
+    """
+    get_url = mocker.patch.object(
+        tabular_report_state, "_get_url", return_value="http://chart/data"
+    )
+    fetch = mocker.patch(
+        "superset.commands.report.execute.get_chart_csv_data",
+        return_value=expected_bytes,
+    )
+
+    assert tabular_report_state._get_data(result_format) == expected_bytes
+
+    # The result format must be threaded through to the URL, not hardcoded.
+    get_url.assert_called_once_with(result_format=result_format)
+    assert fetch.call_args.kwargs["chart_url"] == "http://chart/data"
+
+
+@pytest.mark.parametrize(
+    "result_format,expected_error",
+    [
+        (ChartDataResultFormat.XLSX, ReportScheduleXlsxTimeout),
+        (ChartDataResultFormat.CSV, ReportScheduleCsvTimeout),
+    ],
+)
+def test_get_data_timeout_raises_format_specific_error(
+    tabular_report_state: BaseReportState,
+    mocker: MockerFixture,
+    result_format: ChartDataResultFormat,
+    expected_error: type[Exception],
+) -> None:
+    """
+    Test that a soft timeout surfaces as the timeout error for that format.
+    """
+    mocker.patch.object(tabular_report_state, "_get_url", return_value="http://chart")
+    mocker.patch(
+        "superset.commands.report.execute.get_chart_csv_data",
+        side_effect=SoftTimeLimitExceeded(),
+    )
+
+    with pytest.raises(expected_error):
+        tabular_report_state._get_data(result_format)
+
+
+@pytest.mark.parametrize(
+    "result_format,expected_error",
+    [
+        (ChartDataResultFormat.XLSX, ReportScheduleXlsxFailedError),
+        (ChartDataResultFormat.CSV, ReportScheduleCsvFailedError),
+    ],
+)
+def test_get_data_empty_response_raises_format_specific_error(
+    tabular_report_state: BaseReportState,
+    mocker: MockerFixture,
+    result_format: ChartDataResultFormat,
+    expected_error: type[Exception],
+) -> None:
+    """
+    Test that an empty payload surfaces as the failure error for that format.
+    """
+    mocker.patch.object(tabular_report_state, "_get_url", return_value="http://chart")
+    mocker.patch(
+        "superset.commands.report.execute.get_chart_csv_data", return_value=None
+    )
+
+    with pytest.raises(expected_error):
+        tabular_report_state._get_data(result_format)
+
+
+@pytest.mark.parametrize(
+    "result_format,expected_error",
+    [
+        (ChartDataResultFormat.XLSX, ReportScheduleXlsxFailedError),
+        (ChartDataResultFormat.CSV, ReportScheduleCsvFailedError),
+    ],
+)
+def test_get_data_without_query_context_passes_format_error_to_fallback(
+    tabular_report_state: BaseReportState,
+    mocker: MockerFixture,
+    result_format: ChartDataResultFormat,
+    expected_error: type[Exception],
+) -> None:
+    """
+    Test the screenshot fallback for charts with no saved query context.
+
+    The fallback must be able to fail with the format's own error class.
+    """
+    tabular_report_state._report_schedule.chart.query_context = None
+    mocker.patch.object(tabular_report_state, "_get_url", return_value="http://chart")
+    mocker.patch(
+        "superset.commands.report.execute.get_chart_csv_data", return_value=b"data"
+    )
+    update_query_context = mocker.patch.object(
+        tabular_report_state, "_update_query_context"
+    )
+
+    tabular_report_state._get_data(result_format)
+
+    update_query_context.assert_called_once_with(expected_error)

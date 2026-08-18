@@ -377,3 +377,59 @@ def test_send_slack_no_feature_flag(
 ```
 """,
     )
+
+
+def test_get_inline_files_with_xlsx(mock_header_data) -> None:
+    """
+    Test the _get_inline_files function to ensure it will return the correct tuple
+    when content has an Excel file
+    """
+    from superset.reports.models import ReportRecipients, ReportRecipientType
+    from superset.reports.notifications.base import NotificationContent
+    from superset.reports.notifications.slack import SlackNotification
+
+    content = NotificationContent(
+        name="test alert",
+        header_data=mock_header_data,
+        description='<p>This is <a href="#">a test</a> alert</p><br />',
+        xlsx=b"PK\x03\x04 mock xlsx bytes",
+    )
+    slack_notification = SlackNotification(
+        recipient=ReportRecipients(
+            type=ReportRecipientType.SLACK,
+            recipient_config_json='{"target": "some_channel"}',
+        ),
+        content=content,
+    )
+
+    result = slack_notification._get_inline_files()
+
+    assert result == ("xlsx", [b"PK\x03\x04 mock xlsx bytes"])
+
+
+def test_get_inline_files_with_xlsx_slackv2(mock_header_data) -> None:
+    """
+    Test the _get_inline_files function of the SlackV2 notification
+    to ensure it will return the correct tuple when content has an Excel file
+    """
+    from superset.reports.models import ReportRecipients, ReportRecipientType
+    from superset.reports.notifications.base import NotificationContent
+    from superset.reports.notifications.slackv2 import SlackV2Notification
+
+    content = NotificationContent(
+        name="test alert",
+        header_data=mock_header_data,
+        description='<p>This is <a href="#">a test</a> alert</p><br />',
+        xlsx=b"PK\x03\x04 mock xlsx bytes",
+    )
+    slack_notification = SlackV2Notification(
+        recipient=ReportRecipients(
+            type=ReportRecipientType.SLACKV2,
+            recipient_config_json='{"target": "some_channel"}',
+        ),
+        content=content,
+    )
+
+    result = slack_notification._get_inline_files()
+
+    assert result == ("xlsx", [b"PK\x03\x04 mock xlsx bytes"])

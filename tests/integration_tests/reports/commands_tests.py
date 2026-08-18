@@ -52,6 +52,8 @@ from superset.commands.report.exceptions import (
     ReportScheduleScreenshotTimeout,
     ReportScheduleSystemErrorsException,
     ReportScheduleWorkingTimeoutError,
+    ReportScheduleXlsxFailedError,
+    ReportScheduleXlsxTimeout,
 )
 from superset.commands.report.execute import (
     AsyncExecuteReportScheduleCommand,
@@ -98,6 +100,7 @@ from tests.integration_tests.reports.utils import (
     reset_key_values,
     SCREENSHOT_FILE,
     TEST_ID,
+    XLSX_FILE,
 )
 from tests.integration_tests.test_app import app
 
@@ -244,6 +247,20 @@ def create_report_email_chart_with_csv():
 
 
 @pytest.fixture
+def create_report_email_chart_with_xlsx():
+    chart = db.session.query(Slice).first()
+    chart.query_context = '{"mock": "query_context"}'
+    report_schedule = create_report_notification(
+        email_target="target@email.com",
+        chart=chart,
+        report_format=ReportDataFormat.XLSX,
+        name="report_xlsx",
+    )
+    yield report_schedule
+    cleanup_report_schedule(report_schedule)
+
+
+@pytest.fixture
 def create_report_email_chart_with_text():
     chart = db.session.query(Slice).first()
     chart.query_context = '{"mock": "query_context"}'
@@ -325,6 +342,21 @@ def create_report_slack_chart_with_csv():
         slack_channel="slack_channel",
         chart=chart,
         report_format=ReportDataFormat.CSV,
+    )
+    yield report_schedule
+
+    cleanup_report_schedule(report_schedule)
+
+
+@pytest.fixture
+def create_report_slack_chart_with_xlsx():
+    chart = db.session.query(Slice).first()
+    chart.query_context = '{"mock": "query_context"}'
+    report_schedule = create_report_notification(
+        slack_channel="slack_channel",
+        chart=chart,
+        report_format=ReportDataFormat.XLSX,
+        name="report_slack_xlsx",
     )
     yield report_schedule
 
@@ -2459,4 +2491,175 @@ def test__send_with_server_errors(notification_mock, logger_mock):
     # it logs the error
     logger_mock.warning.assert_called_with(
         "SupersetError(message='', error_type=<SupersetErrorType.REPORT_NOTIFICATION_ERROR: 'REPORT_NOTIFICATION_ERROR'>, level=<ErrorLevel.ERROR: 'error'>, extra=None)"  # noqa: E501
+    )
+
+
+@pytest.mark.usefixtures(
+    "load_birth_names_dashboard_with_slices",
+    "create_report_email_chart_with_xlsx",
+)
+@patch("superset.utils.csv.urllib.request.urlopen")
+@patch("superset.utils.csv.urllib.request.OpenerDirector.open")
+@patch("superset.reports.notifications.email.send_email_smtp")
+@patch("superset.utils.csv.get_chart_csv_data")
+def test_email_chart_report_schedule_with_xlsx(
+    csv_mock,
+    email_mock,
+    mock_open,
+    mock_urlopen,
+    create_report_email_chart_with_xlsx,
+):
+    """
+    ExecuteReport Command: Test chart email report schedule with Excel
+    """
+    # setup xlsx mock
+    response = Mock()
+    mock_open.return_value = response
+    mock_urlopen.return_value = response
+    mock_urlopen.return_value.getcode.return_value = 200
+    response.read.return_value = XLSX_FILE
+
+    with freeze_time("2020-01-01T00:00:00Z"):
+        AsyncExecuteReportScheduleCommand(
+            TEST_ID, create_report_email_chart_with_xlsx.id, datetime.utcnow()
+        ).run()
+
+        notification_targets = get_target_from_report_schedule(
+            create_report_email_chart_with_xlsx
+        )
+        # Assert the email smtp address
+        assert email_mock.call_args[0][0] == notification_targets[0]
+        # Assert the Excel attachment, keyed by a .xlsx filename
+        attachments = email_mock.call_args[1]["data"]
+        attachment_name = list(attachments.keys())[0]
+        assert attachment_name.endswith(".xlsx")
+        assert attachments[attachment_name] == XLSX_FILE
+        # Assert logs are correct
+        assert_log(ReportState.SUCCESS)
+
+
+@pytest.mark.usefixtures(
+    "load_birth_names_dashboard_with_slices", "create_report_slack_chart_with_xlsx"
+)
+@patch("superset.reports.notifications.slack.should_use_v2_api", return_value=False)
+@patch("superset.reports.notifications.slack.get_slack_client")
+@patch("superset.utils.csv.urllib.request.urlopen")
+@patch("superset.utils.csv.urllib.request.OpenerDirector.open")
+@patch("superset.utils.csv.get_chart_csv_data")
+def test_slack_chart_report_schedule_with_xlsx(
+    csv_mock,
+    mock_open,
+    mock_urlopen,
+    slack_client_mock_class,
+    slack_should_use_v2_api_mock,
+    create_report_slack_chart_with_xlsx,
+):
+    """
+    ExecuteReport Command: Test chart slack report V1 schedule with Excel
+    """
+    # setup xlsx mock
+    response = Mock()
+    mock_open.return_value = response
+    mock_urlopen.return_value = response
+    mock_urlopen.return_value.getcode.return_value = 200
+    response.read.return_value = XLSX_FILE
+
+    notification_targets = get_target_from_report_schedule(
+        create_report_slack_chart_with_xlsx
+    )
+
+    channel_name = notification_targets[0]
+
+    with freeze_time("2020-01-01T00:00:00Z"):
+        AsyncExecuteReportScheduleCommand(
+            TEST_ID, create_report_slack_chart_with_xlsx.id, datetime.utcnow()
+        ).run()
+
+        assert (
+            slack_client_mock_class.return_value.files_upload.call_args[1]["channels"]
+            == channel_name
+        )
+        assert (
+            slack_client_mock_class.return_value.files_upload.call_args[1]["file"]
+            == XLSX_FILE
+        )
+
+        # Assert logs are correct
+        assert_log(ReportState.SUCCESS)
+
+
+@pytest.mark.usefixtures(
+    "load_birth_names_dashboard_with_slices", "create_report_email_chart_with_xlsx"
+)
+@patch("superset.utils.csv.urllib.request.urlopen")
+@patch("superset.utils.csv.urllib.request.OpenerDirector.open")
+@patch("superset.reports.notifications.email.send_email_smtp")
+@patch("superset.utils.csv.get_chart_csv_data")
+def test_soft_timeout_xlsx(
+    csv_mock,
+    email_mock,
+    mock_open,
+    mock_urlopen,
+    create_report_email_chart_with_xlsx,
+):
+    """
+    ExecuteReport Command: Test soft timeout on generating an Excel file
+    """
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    response = Mock()
+    mock_open.return_value = response
+    mock_urlopen.return_value = response
+    mock_urlopen.return_value.getcode.side_effect = SoftTimeLimitExceeded()
+
+    with pytest.raises(ReportScheduleXlsxTimeout):
+        AsyncExecuteReportScheduleCommand(
+            TEST_ID, create_report_email_chart_with_xlsx.id, datetime.utcnow()
+        ).run()
+
+    get_target_from_report_schedule(create_report_email_chart_with_xlsx)  # noqa: F841
+    # Assert the email smtp address, asserts a notification was sent with the error
+    assert email_mock.call_args[0][0] == DEFAULT_OWNER_EMAIL
+
+    assert_log(
+        ReportState.ERROR,
+        error_message="A timeout occurred while generating an Excel file.",
+    )
+
+
+@pytest.mark.usefixtures(
+    "load_birth_names_dashboard_with_slices", "create_report_email_chart_with_xlsx"
+)
+@patch("superset.utils.csv.urllib.request.urlopen")
+@patch("superset.utils.csv.urllib.request.OpenerDirector.open")
+@patch("superset.reports.notifications.email.send_email_smtp")
+@patch("superset.utils.csv.get_chart_csv_data")
+def test_generate_no_xlsx(
+    csv_mock,
+    email_mock,
+    mock_open,
+    mock_urlopen,
+    create_report_email_chart_with_xlsx,
+):
+    """
+    ExecuteReport Command: Test fail on empty Excel payload
+    """
+    response = Mock()
+    mock_open.return_value = response
+    mock_urlopen.return_value = response
+    mock_urlopen.return_value.getcode.return_value = 200
+    response.read.return_value = None
+
+    with pytest.raises(ReportScheduleXlsxFailedError):
+        AsyncExecuteReportScheduleCommand(
+            TEST_ID, create_report_email_chart_with_xlsx.id, datetime.utcnow()
+        ).run()
+
+    get_target_from_report_schedule(create_report_email_chart_with_xlsx)  # noqa: F841
+    # Assert the email smtp address, asserts a notification was sent with the error
+    assert email_mock.call_args[0][0] == DEFAULT_OWNER_EMAIL
+
+    assert_log(
+        ReportState.ERROR,
+        error_message="Report Schedule execution failed when generating an Excel file.",
     )

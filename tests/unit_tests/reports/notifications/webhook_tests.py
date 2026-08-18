@@ -223,3 +223,36 @@ def test_send_http_only_https_check(monkeypatch, mock_header_data) -> None:
 
     with pytest.raises(NotificationParamException, match="HTTPS is required by config"):
         webhook_notification.send()
+
+
+def test_get_files_includes_xlsx(mock_header_data) -> None:
+    """
+    Test that _get_files includes the Excel attachment with the spreadsheetml MIME type
+    """
+
+    from superset.reports.models import ReportRecipients, ReportRecipientType
+    from superset.reports.notifications.base import NotificationContent
+
+    xlsx_bytes = b"PK\x03\x04 mock xlsx bytes"
+
+    content = NotificationContent(
+        name="file test",
+        header_data=mock_header_data,
+        xlsx=xlsx_bytes,
+        description="files test",
+    )
+    webhook_notification = WebhookNotification(
+        recipient=ReportRecipients(
+            type=ReportRecipientType.WEBHOOK,
+            recipient_config_json='{"target": "https://webhook.com"}',
+        ),
+        content=content,
+    )
+    files = webhook_notification._get_files()
+
+    assert len(files) == 1
+    assert files[0][1][0] == "report.xlsx"
+    assert files[0][1][1] == xlsx_bytes
+    assert files[0][1][2] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )

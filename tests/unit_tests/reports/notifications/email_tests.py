@@ -100,3 +100,72 @@ def test_email_subject_with_datetime() -> None:
     )._get_subject()
     assert datetime_pattern not in subject
     assert now.strftime(datetime_pattern) in subject
+
+
+def _header_data() -> dict:
+    return {
+        "notification_format": "XLSX",
+        "notification_type": "Report",
+        "owners": [1],
+        "notification_source": None,
+        "chart_id": None,
+        "dashboard_id": None,
+        "slack_channels": None,
+        "execution_id": "test-execution-id",
+    }
+
+
+def test_email_attaches_xlsx() -> None:
+    # `superset.models.helpers`, a dependency of following imports,
+    # requires app context
+    from superset.reports.models import ReportRecipients, ReportRecipientType
+    from superset.reports.notifications.base import NotificationContent
+    from superset.reports.notifications.email import EmailNotification
+
+    content = NotificationContent(
+        name="test report",
+        header_data=_header_data(),
+        xlsx=b"PK\x03\x04 mock xlsx bytes",
+    )
+    email_content = EmailNotification(
+        recipient=ReportRecipients(type=ReportRecipientType.EMAIL), content=content
+    )._get_content()
+
+    assert email_content.data == {"test report.xlsx": b"PK\x03\x04 mock xlsx bytes"}
+
+
+def test_email_attaches_csv() -> None:
+    # `superset.models.helpers`, a dependency of following imports,
+    # requires app context
+    from superset.reports.models import ReportRecipients, ReportRecipientType
+    from superset.reports.notifications.base import NotificationContent
+    from superset.reports.notifications.email import EmailNotification
+
+    content = NotificationContent(
+        name="test report",
+        header_data=_header_data(),
+        csv=b"col1,col2\n1,2",
+    )
+    email_content = EmailNotification(
+        recipient=ReportRecipients(type=ReportRecipientType.EMAIL), content=content
+    )._get_content()
+
+    assert email_content.data == {"test report.csv": b"col1,col2\n1,2"}
+
+
+def test_email_attaches_no_data_when_neither_present() -> None:
+    # `superset.models.helpers`, a dependency of following imports,
+    # requires app context
+    from superset.reports.models import ReportRecipients, ReportRecipientType
+    from superset.reports.notifications.base import NotificationContent
+    from superset.reports.notifications.email import EmailNotification
+
+    content = NotificationContent(
+        name="test report",
+        header_data=_header_data(),
+    )
+    email_content = EmailNotification(
+        recipient=ReportRecipients(type=ReportRecipientType.EMAIL), content=content
+    )._get_content()
+
+    assert email_content.data is None
