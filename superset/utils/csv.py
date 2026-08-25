@@ -18,7 +18,7 @@ import logging
 import re
 import urllib.request
 from typing import Any, Optional, Union
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import numpy as np
 import pandas as pd
@@ -89,10 +89,17 @@ def get_chart_csv_data(
         opener = urllib.request.build_opener()
         cookie_str = ";".join([f"{key}={val}" for key, val in auth_cookies.items()])
         opener.addheaders.append(("Cookie", cookie_str))
-        response = opener.open(chart_url)
-        content = response.read()
-        if response.getcode() != 200:
-            raise URLError(response.getcode())
+        try:
+            response = opener.open(chart_url)
+            content = response.read()
+            if response.getcode() != 200:
+                raise URLError(response.getcode())
+        except HTTPError as ex:
+            error_body = ex.read().decode("utf-8", errors="replace").strip()
+            message = f"HTTP Error {ex.code}: {ex.reason}"
+            if error_body:
+                message = f"{message} - {error_body}"
+            raise RuntimeError(message) from ex
     if content:
         return content
     return None
