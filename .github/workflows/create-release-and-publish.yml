@@ -36,6 +36,7 @@ jobs:
         with:
           push: true
           tags: ${{ env.IMAGE }}
+          target: lean
       -
         name: Create Release
         id: create_release
